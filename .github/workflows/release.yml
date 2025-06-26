@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Create output directory
+        run: mkdir -p dist
+
+      - name: Build for Windows x64
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          go build -o dist/go-srtla-windows-x64.exe
+
+      - name: Build for macOS ARM64
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+        run: |
+          go build -o dist/go-srtla-macos-arm64
+
+      - name: Build for Linux x64
+        env:
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build -o dist/go-srtla-linux-x64
+
+      - name: Build for Linux ARM64
+        env:
+          GOOS: linux
+          GOARCH: arm64
+        run: |
+          go build -o dist/go-srtla-linux-arm64
+
+      - name: Make binaries executable
+        run: |
+          chmod +x dist/go-srtla-macos-arm64
+          chmod +x dist/go-srtla-linux-x64
+          chmod +x dist/go-srtla-linux-arm64
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dist/go-srtla-windows-x64.exe
+            dist/go-srtla-macos-arm64
+            dist/go-srtla-linux-x64
+            dist/go-srtla-linux-arm64
+          body: |
+            ## Download
+            
+            Choose the appropriate binary for your platform:
+            
+            ### Windows
+            - **x64**: `go-srtla-windows-x64.exe`
+            
+            ### macOS
+            - **Apple Silicon (ARM64)**: `go-srtla-macos-arm64`
+            
+            ### Linux
+            - **x64**: `go-srtla-linux-x64`
+            - **ARM64**: `go-srtla-linux-arm64`
+        
+            
+            For more options, run with `--help` flag.
+          draft: false
+          prerelease: false
