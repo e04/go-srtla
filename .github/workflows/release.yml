@@ -30,59 +30,54 @@ jobs:
           GOOS: windows
           GOARCH: amd64
         run: |
-          go build -o dist/go-srtla-windows-x64.exe
+          mkdir -p dist/windows-x64
+          go build -o dist/windows-x64/go-srtla.exe
 
       - name: Build for macOS ARM64
         env:
           GOOS: darwin
           GOARCH: arm64
         run: |
-          go build -o dist/go-srtla-macos-arm64
+          mkdir -p dist/macos-arm64
+          go build -o dist/macos-arm64/go-srtla
 
       - name: Build for Linux x64
         env:
           GOOS: linux
           GOARCH: amd64
         run: |
-          go build -o dist/go-srtla-linux-x64
+          mkdir -p dist/linux-x64
+          go build -o dist/linux-x64/go-srtla
 
       - name: Build for Linux ARM64
         env:
           GOOS: linux
           GOARCH: arm64
         run: |
-          go build -o dist/go-srtla-linux-arm64
+          mkdir -p dist/linux-arm64
+          go build -o dist/linux-arm64/go-srtla
 
       - name: Make binaries executable
         run: |
-          chmod +x dist/go-srtla-macos-arm64
-          chmod +x dist/go-srtla-linux-x64
-          chmod +x dist/go-srtla-linux-arm64
+          chmod +x dist/macos-arm64/go-srtla
+          chmod +x dist/linux-x64/go-srtla
+          chmod +x dist/linux-arm64/go-srtla
+
+      - name: Create ZIP archives
+        run: |
+          cd dist
+          zip -r go-srtla-windows-x64.zip windows-x64/
+          zip -r go-srtla-macos-arm64.zip macos-arm64/
+          zip -r go-srtla-linux-x64.zip linux-x64/
+          zip -r go-srtla-linux-arm64.zip linux-arm64/
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            dist/go-srtla-windows-x64.exe
-            dist/go-srtla-macos-arm64
-            dist/go-srtla-linux-x64
-            dist/go-srtla-linux-arm64
-          body: |
-            ## Download
-            
-            Choose the appropriate binary for your platform:
-            
-            ### Windows
-            - **x64**: `go-srtla-windows-x64.exe`
-            
-            ### macOS
-            - **Apple Silicon (ARM64)**: `go-srtla-macos-arm64`
-            
-            ### Linux
-            - **x64**: `go-srtla-linux-x64`
-            - **ARM64**: `go-srtla-linux-arm64`
-        
-            
-            For more options, run with `--help` flag.
+            dist/go-srtla-windows-x64.zip
+            dist/go-srtla-macos-arm64.zip
+            dist/go-srtla-linux-x64.zip
+            dist/go-srtla-linux-arm64.zip
           draft: false
           prerelease: false
