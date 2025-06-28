@@ -38,9 +38,9 @@ func parseArgs() {
 	flag.StringVar(&args.SrtHostname, "srt_hostname", "127.0.0.1", "Hostname of the downstream SRT server")
 	flag.IntVar(&args.SrtPort, "srt_port", 5001, "Port of the downstream SRT server")
 	flag.BoolVar(&args.Verbose, "verbose", false, "Enable verbose logging")
-	
+
 	versionFlag := flag.Bool("version", false, "Show version information")
-	
+
 	// Custom usage message
 	flag.Usage = showHelp
 
@@ -86,9 +86,9 @@ func logCritical(format string, v ...interface{}) {
 	log.Fatalf("[CRITICAL] "+format, v...)
 }
 
-//=============================================================================
+// =============================================================================
 // CONSTANTS
-//=============================================================================
+// =============================================================================
 const (
 	SRT_TYPE_ACK         = 0x8002
 	SRTLA_TYPE_KEEPALIVE = 0x9000
@@ -178,13 +178,16 @@ func (g *SrtlaConnGroup) destroy() {
 
 // srtlaSocket is the main listening socket for client connections.
 var srtlaSocket *net.UDPConn
+
 // srtAddress is the resolved address of the downstream SRT server.
 var srtAddress *net.UDPAddr
 
 // groupsById tracks groups by their unique hex ID.
 var groupsById = make(map[string]*SrtlaConnGroup)
+
 // groupsByAddr tracks which group a client address belongs to.
 var groupsByAddr = make(map[string]*SrtlaConnGroup)
+
 // globalMutex protects access to the global maps.
 var globalMutex = &sync.RWMutex{}
 
@@ -305,10 +308,10 @@ func connReg(addr *net.UDPAddr, inBuf []byte, ts time.Time) {
 		logError("[%s] Connection registration failed: No group found for id %s", addrKey, id)
 		return
 	}
-	
+
 	group.Lock()
 	defer group.Unlock()
-	
+
 	existingGroupForAddr, ok := groupsByAddr[addrKey]
 	if ok && existingGroupForAddr != group {
 		sendTo(addr, []byte{SRTLA_TYPE_REG_ERR >> 8, SRTLA_TYPE_REG_ERR & 0xff})
@@ -340,7 +343,7 @@ func connReg(addr *net.UDPAddr, inBuf []byte, ts time.Time) {
 		group.connsByAddr[addrKey] = newConn
 		groupsByAddr[addrKey] = group
 	}
-	
+
 	group.lastAddr = addr
 	logInfo("[%s] [Group: %s] Connection registration successful", addrKey, group.getShortId())
 }
@@ -371,7 +374,7 @@ func handleSrtData(group *SrtlaConnGroup, msg []byte) {
 
 	group.RLock()
 	defer group.RUnlock()
-	
+
 	if isSrtAck(msg) {
 		for _, conn := range group.connsByAddr {
 			sendTo(conn.addr, msg)
@@ -394,18 +397,18 @@ func handleSrtlaData(msg []byte, rinfo *net.UDPAddr) {
 	}
 
 	addrKey := getAddrKey(rinfo)
-	
+
 	globalMutex.RLock()
 	group, ok := groupsByAddr[addrKey]
 	globalMutex.RUnlock()
-	
+
 	if !ok {
 		logDebug("Discarding packet from unknown source %s", addrKey)
 		return
 	}
 
 	group.Lock() // Lock group for modification
-	
+
 	conn, ok := group.connsByAddr[addrKey]
 	if !ok {
 		group.Unlock()
@@ -451,7 +454,7 @@ func handleSrtlaData(msg []byte, rinfo *net.UDPAddr) {
 			globalMutex.Unlock()
 		}
 	}
-	
+
 	if group.srtSocket == nil {
 		sock, err := net.DialUDP("udp", nil, srtAddress)
 		if err != nil {
@@ -459,15 +462,19 @@ func handleSrtlaData(msg []byte, rinfo *net.UDPAddr) {
 			group.Unlock()
 			return
 		}
-		
+
 		err = sock.SetReadBuffer(RECV_BUF_SIZE)
-		if err != nil { logWarn("Could not set read buffer size on downstream socket: %v", err)}
+		if err != nil {
+			logWarn("Could not set read buffer size on downstream socket: %v", err)
+		}
 		err = sock.SetWriteBuffer(SEND_BUF_SIZE)
-		if err != nil { logWarn("Could not set write buffer size on downstream socket: %v", err)}
+		if err != nil {
+			logWarn("Could not set write buffer size on downstream socket: %v", err)
+		}
 
 		group.srtSocket = sock
 		logInfo("[Group: %s] Created SRT socket connected to %s. Local Port: %s", group.getShortId(), srtAddress.String(), sock.LocalAddr().String())
-		
+
 		// Start a goroutine to listen for messages from the downstream server
 		go func(g *SrtlaConnGroup) {
 			buf := make([]byte, 2048)
@@ -497,7 +504,7 @@ func cleanupGroupsAndConnections() {
 	ts := time.Now()
 	groupTimeout := GROUP_TIMEOUT_S
 	connTimeout := CONN_TIMEOUT_S
-	
+
 	removedGroups := 0
 	removedConns := 0
 
@@ -565,33 +572,33 @@ func logConnectionStats() {
 
 	for _, group := range groupsById {
 		group.Lock() // Lock group for writing (resetting stats)
-		
+
 		groupHasActivity := false
 		var groupLogLines []string
-		
+
 		for _, conn := range group.connsByAddr {
 			timeDiffS := now.Sub(conn.lastStatsTime).Seconds()
-			
+
 			if conn.bytesReceived > 0 && timeDiffS > 0 {
 				bandwidthMbps := (float64(conn.bytesReceived) * 8) / timeDiffS / 1_000_000
 				totalBandwidth += bandwidthMbps
-				
+
 				groupLogLines = append(groupLogLines, fmt.Sprintf("  -> Conn [%s]: %.2f Mbps", conn.addrKey, bandwidthMbps))
-				
+
 				activityLogged = true
 				groupHasActivity = true
 			}
-			
+
 			// Always reset for the next interval
 			conn.bytesReceived = 0
 			conn.lastStatsTime = now
 		}
-		
+
 		if groupHasActivity {
 			logLines = append(logLines, fmt.Sprintf("[Group: %s]", group.getShortId()))
 			logLines = append(logLines, groupLogLines...)
 		}
-		
+
 		group.Unlock()
 	}
 
@@ -607,14 +614,13 @@ func logConnectionStats() {
 	}
 }
 
-
 //=============================================================================
 // MAIN EXECUTION
 //=============================================================================
 
 func main() {
 	parseArgs()
-	
+
 	logInfo("srtla_rec v%s starting...", VERSION)
 	logInfo("Config - SRTLA Port: %d, SRT Target: %s:%d, Verbose: %v",
 		args.SrtlaPort, args.SrtHostname, args.SrtPort, args.Verbose)
@@ -636,10 +642,14 @@ func main() {
 	defer srtlaSocket.Close()
 
 	err = srtlaSocket.SetReadBuffer(RECV_BUF_SIZE)
-	if err != nil { logWarn("Could not set read buffer size on main socket: %v", err)}
+	if err != nil {
+		logWarn("Could not set read buffer size on main socket: %v", err)
+	}
 	err = srtlaSocket.SetWriteBuffer(SEND_BUF_SIZE)
-	if err != nil { logWarn("Could not set write buffer size on main socket: %v", err)}
-	
+	if err != nil {
+		logWarn("Could not set write buffer size on main socket: %v", err)
+	}
+
 	logInfo("srtla_rec is now running, listening on %s", srtlaSocket.LocalAddr().String())
 
 	// Set up context for graceful shutdown
@@ -671,14 +681,14 @@ func main() {
 			}
 		}
 	}()
-	
+
 	// Handle shutdown signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigChan
 		logInfo("Shutting down...")
-		
+
 		globalMutex.RLock()
 		for _, group := range groupsById {
 			group.destroy()
@@ -707,7 +717,7 @@ func main() {
 		// Make a copy of the slice to handle it concurrently
 		msg := make([]byte, n)
 		copy(msg, buffer[:n])
-		
+
 		// Handle packet in a new goroutine to avoid blocking the listener
 		go handleSrtlaData(msg, rinfo)
 	}
