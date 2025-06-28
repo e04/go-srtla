@@ -437,13 +437,13 @@ func handleSrtlaData(msg []byte, rinfo *net.UDPAddr) {
 		registerPacket(conn, sn)
 	}
 
-	forwardPacket := func() {
+	forwardPacket := func() bool {
 		if group.srtSocket == nil {
 			group.Unlock() // must unlock before removeGroup to avoid deadlock
 			globalMutex.Lock()
 			removeGroup(group)
 			globalMutex.Unlock()
-			return
+			return false // indicate that group was unlocked
 		}
 		_, err := group.srtSocket.Write(msg)
 		if err != nil {
@@ -452,7 +452,9 @@ func handleSrtlaData(msg []byte, rinfo *net.UDPAddr) {
 			globalMutex.Lock()
 			removeGroup(group)
 			globalMutex.Unlock()
+			return false // indicate that group was unlocked
 		}
+		return true // indicate that group is still locked
 	}
 
 	if group.srtSocket == nil {
@@ -495,8 +497,9 @@ func handleSrtlaData(msg []byte, rinfo *net.UDPAddr) {
 		}(group)
 	}
 
-	forwardPacket()
-	group.Unlock() // Everything done, unlock group
+	if forwardPacket() {
+		group.Unlock() // Everything done, unlock group only if still locked
+	}
 }
 
 func cleanupGroupsAndConnections() {
