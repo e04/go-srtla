@@ -105,6 +105,7 @@ const (
 	SRTLA_TYPE_REG3_LEN  = 2
 	SEND_BUF_SIZE        = 32 * 1024 * 1024
 	RECV_BUF_SIZE        = 32 * 1024 * 1024
+	MTU_SIZE             = 1500
 	MAX_CONNS_PER_GROUP  = 16
 	MAX_GROUPS           = 200
 	CLEANUP_PERIOD_S     = 3 * time.Second
@@ -474,7 +475,7 @@ func handleSrtlaData(msg []byte, rinfo *net.UDPAddr) {
 
 		// Start a goroutine to listen for messages from the downstream server
 		go func(g *SrtlaConnGroup) {
-			buf := make([]byte, 2048)
+			buf := make([]byte, MTU_SIZE)
 			for {
 				n, err := g.srtSocket.Read(buf)
 				if err != nil {
@@ -630,7 +631,7 @@ func main() {
 	}()
 
 	// Main listening loop
-	buffer := make([]byte, 2048) // A reasonable buffer size for UDP
+	buffer := make([]byte, MTU_SIZE)
 	for {
 		n, rinfo, err := srtlaSocket.ReadFromUDP(buffer)
 		if err != nil {
