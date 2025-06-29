@@ -111,7 +111,6 @@ const (
 	GROUP_TIMEOUT_S      = 10 * time.Second
 	CONN_TIMEOUT_S       = 10 * time.Second
 	RECV_ACK_INT         = 10
-	STATS_LOG_INTERVAL_S = 1 * time.Second
 )
 
 //=============================================================================
@@ -120,13 +119,11 @@ const (
 
 // SrtlaConn represents a single client connection.
 type SrtlaConn struct {
-	addr          *net.UDPAddr
-	lastRcvd      time.Time
-	recvIdx       int
-	recvLog       []uint32
-	addrKey       string
-	bytesReceived int64
-	lastStatsTime time.Time
+	addr     *net.UDPAddr
+	lastRcvd time.Time
+	recvIdx  int
+	recvLog  []uint32
+	addrKey  string
 }
 
 // SrtlaConnGroup represents a logical group of connections.
@@ -334,11 +331,10 @@ func connReg(addr *net.UDPAddr, inBuf []byte, ts time.Time) {
 
 	if !alreadyRegistered {
 		newConn := &SrtlaConn{
-			addr:          addr,
-			lastRcvd:      ts,
-			recvLog:       make([]uint32, RECV_ACK_INT),
-			addrKey:       addrKey,
-			lastStatsTime: ts,
+			addr:     addr,
+			lastRcvd: ts,
+			recvLog:  make([]uint32, RECV_ACK_INT),
+			addrKey:  addrKey,
 		}
 		group.connsByAddr[addrKey] = newConn
 		groupsByAddr[addrKey] = group
@@ -417,7 +413,6 @@ func handleSrtlaData(msg []byte, rinfo *net.UDPAddr) {
 	}
 
 	conn.lastRcvd = ts
-	conn.bytesReceived += int64(len(msg))
 	group.lastAddr = rinfo
 
 	if isSrtlaKeepalive(msg) {
@@ -561,62 +556,6 @@ func cleanupGroupsAndConnections() {
 	logDebug("Cleanup run ended. Removed %d groups and %d connections.", removedGroups, removedConns)
 }
 
-func logConnectionStats() {
-	globalMutex.RLock()
-	if len(groupsById) == 0 {
-		globalMutex.RUnlock()
-		return
-	}
-
-	now := time.Now()
-	var logLines []string
-	var totalBandwidth float64
-	activityLogged := false
-
-	for _, group := range groupsById {
-		group.Lock() // Lock group for writing (resetting stats)
-
-		groupHasActivity := false
-		var groupLogLines []string
-
-		for _, conn := range group.connsByAddr {
-			timeDiffS := now.Sub(conn.lastStatsTime).Seconds()
-
-			if conn.bytesReceived > 0 && timeDiffS > 0 {
-				bandwidthMbps := (float64(conn.bytesReceived) * 8) / timeDiffS / 1_000_000
-				totalBandwidth += bandwidthMbps
-
-				groupLogLines = append(groupLogLines, fmt.Sprintf("  -> Conn [%s]: %.2f Mbps", conn.addrKey, bandwidthMbps))
-
-				activityLogged = true
-				groupHasActivity = true
-			}
-
-			// Always reset for the next interval
-			conn.bytesReceived = 0
-			conn.lastStatsTime = now
-		}
-
-		if groupHasActivity {
-			logLines = append(logLines, fmt.Sprintf("[Group: %s]", group.getShortId()))
-			logLines = append(logLines, groupLogLines...)
-		}
-
-		group.Unlock()
-	}
-
-	globalMutex.RUnlock()
-
-	if activityLogged {
-		logInfo("--- Bandwidth Stats ---")
-		for _, line := range logLines {
-			logInfo(line)
-		}
-		logInfo("Total Ingress: %.2f Mbps", totalBandwidth)
-		logInfo("-----------------------")
-	}
-}
-
 //=============================================================================
 // MAIN EXECUTION
 //=============================================================================
@@ -667,18 +606,6 @@ func main() {
 			select {
 			case <-ticker.C:
 				cleanupGroupsAndConnections()
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	go func() {
-		ticker := time.NewTicker(STATS_LOG_INTERVAL_S)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				logConnectionStats()
 			case <-ctx.Done():
 				return
 			}
