@@ -46,6 +46,13 @@ To receive the aggregated SRT stream in OBS:
 - `-verbose`: Enable verbose logging
 - `-help`: Show help
 
+## Related Tools
+
+Also check out these related tools:
+
+- **[srt-live-reporter](https://github.com/e04/srt-live-reporter)** - A proxy that provides SRT statistics via WebSocket
+- **[obs-srt-bridge](https://github.com/e04/obs-srt-bridge)** - A tool that automatically switches OBS scenes based on SRT statistics
+
 ## License
 
 GNU Affero General Public License v3.0 (AGPL-3.0)
