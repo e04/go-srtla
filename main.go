@@ -1,655 +1,514 @@
 package main
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/binary"
-	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	mathrand "math/rand"
 	"net"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 	"time"
 )
 
-const VERSION = "1.0.0"
-
-//=============================================================================
-// COMMAND LINE ARGUMENT PARSING
-//=============================================================================
-
-type Arguments struct {
-	SrtlaPort   int
-	SrtHostname string
-	SrtPort     int
-	Verbose     bool
-}
-
-// Global variable to hold parsed arguments
-var args Arguments
-
-func parseArgs() {
-	// Define flags
-	flag.IntVar(&args.SrtlaPort, "srtla_port", 5000, "Port to bind the SRTLA socket to")
-	flag.StringVar(&args.SrtHostname, "srt_hostname", "127.0.0.1", "Hostname of the downstream SRT server")
-	flag.IntVar(&args.SrtPort, "srt_port", 5001, "Port of the downstream SRT server")
-	flag.BoolVar(&args.Verbose, "verbose", false, "Enable verbose logging")
-
-	versionFlag := flag.Bool("version", false, "Show version information")
-
-	// Custom usage message
-	flag.Usage = showHelp
-
-	// Parse the flags
-	flag.Parse()
-
-	if *versionFlag {
-		fmt.Println(VERSION)
-		os.Exit(0)
-	}
-}
-
-func showHelp() {
-	fmt.Printf("srtla_rec v%s\n\n", VERSION)
-	fmt.Println("Usage: go run main.go [options]")
-	fmt.Println("\nOptions:")
-	flag.PrintDefaults()
-}
-
-//=============================================================================
-// LOGGING
-//=============================================================================
-
-func logInfo(format string, v ...interface{}) {
-	log.Printf("[INFO] "+format, v...)
-}
-
-func logError(format string, v ...interface{}) {
-	log.Printf("[ERROR] "+format, v...)
-}
-
-func logWarn(format string, v ...interface{}) {
-	log.Printf("[WARN] "+format, v...)
-}
-
-func logDebug(format string, v ...interface{}) {
-	if args.Verbose {
-		log.Printf("[DEBUG] "+format, v...)
-	}
-}
-
-func logCritical(format string, v ...interface{}) {
-	log.Fatalf("[CRITICAL] "+format, v...)
-}
-
-// =============================================================================
-// CONSTANTS
-// =============================================================================
 const (
-	SRT_TYPE_ACK         = 0x8002
-	SRTLA_TYPE_KEEPALIVE = 0x9000
-	SRTLA_TYPE_ACK       = 0x9100
-	SRTLA_TYPE_REG1      = 0x9200
-	SRTLA_TYPE_REG2      = 0x9201
-	SRTLA_TYPE_REG3      = 0x9202
-	SRTLA_TYPE_REG_ERR   = 0x9210
-	SRTLA_TYPE_REG_NGP   = 0x9211
-	SRT_MIN_LEN          = 16
-	SRTLA_ID_LEN         = 256
-	SRTLA_TYPE_REG1_LEN  = 2 + SRTLA_ID_LEN
-	SRTLA_TYPE_REG2_LEN  = 2 + SRTLA_ID_LEN
-	SRTLA_TYPE_REG3_LEN  = 2
-	SEND_BUF_SIZE        = 32 * 1024 * 1024
-	RECV_BUF_SIZE        = 32 * 1024 * 1024
-	MTU_SIZE             = 1500
-	MAX_CONNS_PER_GROUP  = 16
-	MAX_GROUPS           = 200
-	CLEANUP_PERIOD_S     = 3 * time.Second
-	GROUP_TIMEOUT_S      = 10 * time.Second
-	CONN_TIMEOUT_S       = 10 * time.Second
-	RECV_ACK_INT         = 10
+	MTU = 1500
+
+	SRTTypeHandshake = 0x8000
+	SRTTypeACK       = 0x8002
+	SRTTypeShutdown  = 0x8005
+
+	SRTLATypeKeepalive = 0x9000
+	SRTLATypeACK       = 0x9100
+	SRTLATypeReg1      = 0x9200
+	SRTLATypeReg2      = 0x9201
+	SRTLATypeReg3      = 0x9202
+	SRTLATypeRegErr    = 0x9210
+	SRTLATypeRegNGP    = 0x9211
+
+	SRTLAIDLen   = 256
+	SRTLAReg1Len = 2 + SRTLAIDLen
+	SRTLAReg2Len = 2 + SRTLAIDLen
+	SRTLAReg3Len = 2
+
+	RecvACKInterval = 10 // number of pkts before sending SRT-LA ACK
+
+	MaxConnsPerGroup = 16
+	MaxGroups        = 200
+
+	CleanupPeriod = 3 * time.Second
+	GroupTimeout  = 10 * time.Second
+	ConnTimeout   = 10 * time.Second
+
+	SendBufSize = 32 * 1024 * 1024 // 32 MB
+	RecvBufSize = 32 * 1024 * 1024
 )
 
-//=============================================================================
-// DATA STRUCTURES
-//============================================================================
+func constantTimeCompare(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var diff byte
+	for i := 0; i < len(a); i++ {
+		diff |= a[i] ^ b[i]
+	}
+	return diff == 0
+}
 
-// SrtlaConn represents a single client connection.
-type SrtlaConn struct {
+func randomBytes(n int) []byte {
+	b := make([]byte, n)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		// crypto/rand should never fail on *nix, fall back to math/rand if it
+		// ever does.
+		log.Printf("warning: crypto/rand failed (%v); falling back to pseudo-rand", err)
+		for i := range b {
+			b[i] = byte(mathrand.Intn(256))
+		}
+	}
+	return b
+}
+
+func udpAddrEqual(a, b *net.UDPAddr) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return a.IP.Equal(b.IP) && a.Port == b.Port
+}
+
+type Conn struct {
 	addr     *net.UDPAddr
 	lastRcvd time.Time
-	recvIdx  int
-	recvLog  []uint32
-	addrKey  string
 }
 
-// SrtlaConnGroup represents a logical group of connections.
-type SrtlaConnGroup struct {
-	sync.RWMutex
-	id          []byte
-	idKey       string
-	connsByAddr map[string]*SrtlaConn
-	createdAt   time.Time
-	srtSocket   *net.UDPConn
-	lastAddr    *net.UDPAddr
+type Group struct {
+	id        [SRTLAIDLen]byte
+	conns     []*Conn
+	createdAt time.Time
+	srtSock   *net.UDPConn // connection to downstream SRT server
+	lastAddr  *net.UDPAddr // most recently active client addr
+	mu        sync.Mutex   // protects conns + lastAddr + srtSock
 }
 
-func newSrtlaConnGroup(clientID []byte, ts time.Time) *SrtlaConnGroup {
-	id := make([]byte, SRTLA_ID_LEN)
-	copy(id, clientID)
-	// Fill the second half with random bytes
-	_, err := rand.Read(id[SRTLA_ID_LEN/2:])
-	if err != nil {
-		// This is a critical failure, as we can't generate secure IDs.
-		logCritical("Failed to generate random bytes for group ID: %v", err)
-	}
+var (
+	groupsMu sync.RWMutex
+	groups   []*Group
 
-	return &SrtlaConnGroup{
-		id:          id,
-		idKey:       hex.EncodeToString(id),
-		connsByAddr: make(map[string]*SrtlaConn),
-		createdAt:   ts,
-	}
-}
+	srtlaSock *net.UDPConn
+	srtAddr   *net.UDPAddr // resolved downstream SRT server address
+)
 
-func (g *SrtlaConnGroup) getShortId() string {
-	return g.idKey[:16] // 8 bytes -> 16 hex chars
-}
+func be16(b []byte) uint16 { return binary.BigEndian.Uint16(b) }
 
-func (g *SrtlaConnGroup) destroy() {
-	g.Lock()
-	defer g.Unlock()
-	if g.srtSocket != nil {
-		g.srtSocket.Close()
-		g.srtSocket = nil
-	}
-	logInfo("[Group: %s] Group destroyed.", g.getShortId())
-}
-
-//=============================================================================
-// GLOBAL STATE
-//=============================================================================
-
-// srtlaSocket is the main listening socket for client connections.
-var srtlaSocket *net.UDPConn
-
-// srtAddress is the resolved address of the downstream SRT server.
-var srtAddress *net.UDPAddr
-
-// groupsById tracks groups by their unique hex ID.
-var groupsById = make(map[string]*SrtlaConnGroup)
-
-// groupsByAddr tracks which group a client address belongs to.
-var groupsByAddr = make(map[string]*SrtlaConnGroup)
-
-// globalMutex protects access to the global maps.
-var globalMutex = &sync.RWMutex{}
-
-//=============================================================================
-// UTILITIES
-//=============================================================================
-
-func getAddrKey(addr *net.UDPAddr) string {
-	return addr.String()
-}
-
-func getSrtType(pkt []byte) uint16 {
+func getSRTType(pkt []byte) uint16 {
 	if len(pkt) < 2 {
 		return 0
 	}
-	return binary.BigEndian.Uint16(pkt[0:2])
+	return be16(pkt[:2])
 }
 
-func getSrtSn(pkt []byte) int32 {
-	if len(pkt) < 4 {
-		return -1
-	}
-	sn := binary.BigEndian.Uint32(pkt[0:4])
-	if (sn & 0x80000000) == 0 {
-		return int32(sn)
-	}
-	return -1
+func isSRTAck(pkt []byte) bool         { return getSRTType(pkt) == SRTTypeACK }
+func isSRTLAKeepalive(pkt []byte) bool { return getSRTType(pkt) == SRTLATypeKeepalive }
+
+func isSRTLAReg1(pkt []byte) bool {
+	return len(pkt) == SRTLAReg1Len && getSRTType(pkt) == SRTLATypeReg1
+}
+func isSRTLAReg2(pkt []byte) bool {
+	return len(pkt) == SRTLAReg2Len && getSRTType(pkt) == SRTLATypeReg2
 }
 
-func isSrtAck(pkt []byte) bool {
-	return getSrtType(pkt) == SRT_TYPE_ACK
-}
-
-func isSrtlaKeepalive(pkt []byte) bool {
-	return getSrtType(pkt) == SRTLA_TYPE_KEEPALIVE
-}
-
-func isSrtlaReg1(pkt []byte) bool {
-	return len(pkt) == SRTLA_TYPE_REG1_LEN && getSrtType(pkt) == SRTLA_TYPE_REG1
-}
-
-func isSrtlaReg2(pkt []byte) bool {
-	return len(pkt) == SRTLA_TYPE_REG2_LEN && getSrtType(pkt) == SRTLA_TYPE_REG2
-}
-
-func isSrtlaReg3(pkt []byte) bool {
-	return len(pkt) == SRTLA_TYPE_REG3_LEN && getSrtType(pkt) == SRTLA_TYPE_REG3
-}
-
-//=============================================================================
-// CORE LOGIC
-//=============================================================================
-
-func removeGroup(group *SrtlaConnGroup) {
-	// Assumes globalMutex write lock is held
-	delete(groupsById, group.idKey)
-	group.RLock()
-	for _, conn := range group.connsByAddr {
-		delete(groupsByAddr, conn.addrKey)
-	}
-	if group.lastAddr != nil {
-		delete(groupsByAddr, getAddrKey(group.lastAddr))
-	}
-	group.RUnlock()
-	group.destroy()
-}
-
-func sendTo(addr *net.UDPAddr, packet []byte) {
-	_, err := srtlaSocket.WriteToUDP(packet, addr)
-	if err != nil {
-		logError("Failed to send packet to %s: %v", getAddrKey(addr), err)
-	}
-}
-
-func registerGroup(addr *net.UDPAddr, inBuf []byte, ts time.Time) {
-	addrKey := getAddrKey(addr)
-
-	globalMutex.Lock()
-	defer globalMutex.Unlock()
-
-	if len(groupsById) >= MAX_GROUPS {
-		sendTo(addr, []byte{SRTLA_TYPE_REG_ERR >> 8, SRTLA_TYPE_REG_ERR & 0xff})
-		logError("[%s] Group registration failed: Max groups reached", addrKey)
-		return
-	}
-
-	if _, ok := groupsByAddr[addrKey]; ok {
-		sendTo(addr, []byte{SRTLA_TYPE_REG_ERR >> 8, SRTLA_TYPE_REG_ERR & 0xff})
-		logError("[%s] Group registration failed: Remote address already registered", addrKey)
-		return
-	}
-
-	clientID := inBuf[2:]
-	group := newSrtlaConnGroup(clientID, ts)
-	group.lastAddr = addr
-
-	outBuf := make([]byte, SRTLA_TYPE_REG2_LEN)
-	binary.BigEndian.PutUint16(outBuf[0:2], SRTLA_TYPE_REG2)
-	copy(outBuf[2:], group.id)
-
-	sendTo(addr, outBuf)
-
-	groupsById[group.idKey] = group
-	groupsByAddr[addrKey] = group
-	logInfo("[%s] [Group: %s] Group registered", addrKey, group.getShortId())
-}
-
-func connReg(addr *net.UDPAddr, inBuf []byte, ts time.Time) {
-	addrKey := getAddrKey(addr)
-	id := hex.EncodeToString(inBuf[2:])
-
-	globalMutex.Lock()
-	defer globalMutex.Unlock()
-
-	group, ok := groupsById[id]
-	if !ok {
-		sendTo(addr, []byte{SRTLA_TYPE_REG_NGP >> 8, SRTLA_TYPE_REG_NGP & 0xff})
-		logError("[%s] Connection registration failed: No group found for id %s", addrKey, id)
-		return
-	}
-
-	group.Lock()
-	defer group.Unlock()
-
-	existingGroupForAddr, ok := groupsByAddr[addrKey]
-	if ok && existingGroupForAddr != group {
-		sendTo(addr, []byte{SRTLA_TYPE_REG_ERR >> 8, SRTLA_TYPE_REG_ERR & 0xff})
-		logError("[%s] [Group: %s] Connection registration failed: Provided group ID mismatch", addrKey, group.getShortId())
-		return
-	}
-
-	alreadyRegistered := false
-	if _, ok := group.connsByAddr[addrKey]; ok {
-		alreadyRegistered = true
-	}
-
-	if !alreadyRegistered && len(group.connsByAddr) >= MAX_CONNS_PER_GROUP {
-		sendTo(addr, []byte{SRTLA_TYPE_REG_ERR >> 8, SRTLA_TYPE_REG_ERR & 0xff})
-		logError("[%s] [Group: %s] Connection registration failed: Max group conns reached", addrKey, group.getShortId())
-		return
-	}
-
-	sendTo(addr, []byte{SRTLA_TYPE_REG3 >> 8, SRTLA_TYPE_REG3 & 0xff})
-
-	if !alreadyRegistered {
-		newConn := &SrtlaConn{
-			addr:     addr,
-			lastRcvd: ts,
-			recvLog:  make([]uint32, RECV_ACK_INT),
-			addrKey:  addrKey,
+func findGroupByID(id []byte) *Group {
+	groupsMu.RLock()
+	defer groupsMu.RUnlock()
+	for _, g := range groups {
+		if constantTimeCompare(g.id[:], id) {
+			return g
 		}
-		group.connsByAddr[addrKey] = newConn
-		groupsByAddr[addrKey] = group
 	}
-
-	group.lastAddr = addr
-	logInfo("[%s] [Group: %s] Connection registration successful", addrKey, group.getShortId())
+	return nil
 }
 
-func registerPacket(conn *SrtlaConn, sn int32) {
-	conn.recvLog[conn.recvIdx] = uint32(sn)
-	conn.recvIdx++
-	if conn.recvIdx == RECV_ACK_INT {
-		ackPacket := make([]byte, 4+4*RECV_ACK_INT)
-		headerValue := uint32(SRTLA_TYPE_ACK << 16)
-		binary.BigEndian.PutUint32(ackPacket[0:4], headerValue)
-		for i := 0; i < RECV_ACK_INT; i++ {
-			binary.BigEndian.PutUint32(ackPacket[4+i*4:], conn.recvLog[i])
+func findByAddr(addr *net.UDPAddr) (g *Group, c *Conn) {
+	groupsMu.RLock()
+	defer groupsMu.RUnlock()
+	for _, gr := range groups {
+		for _, conn := range gr.conns {
+			if udpAddrEqual(conn.addr, addr) {
+				return gr, conn
+			}
 		}
-		sendTo(conn.addr, ackPacket)
-		conn.recvIdx = 0
+		if udpAddrEqual(gr.lastAddr, addr) {
+			return gr, nil
+		}
 	}
+	return nil, nil
 }
 
-func handleSrtData(group *SrtlaConnGroup, msg []byte) {
-	if len(msg) < SRT_MIN_LEN {
-		logError("[Group: %s] Invalid SRT packet received from server, length %d. Terminating group.", group.getShortId(), len(msg))
-		globalMutex.Lock()
-		removeGroup(group)
-		globalMutex.Unlock()
-		return
-	}
+func newGroup(clientID []byte) *Group {
+	var g Group
+	g.createdAt = time.Now()
 
-	group.RLock()
-	defer group.RUnlock()
-
-	if isSrtAck(msg) {
-		for _, conn := range group.connsByAddr {
-			sendTo(conn.addr, msg)
-		}
-	} else if group.lastAddr != nil {
-		sendTo(group.lastAddr, msg)
-	}
+	copy(g.id[:SRTLAIDLen/2], clientID)
+	copy(g.id[SRTLAIDLen/2:], randomBytes(SRTLAIDLen/2))
+	return &g
 }
 
-func handleSrtlaData(msg []byte, rinfo *net.UDPAddr) {
-	ts := time.Now()
+func sendRegErr(addr *net.UDPAddr) {
+	var header [2]byte
+	binary.BigEndian.PutUint16(header[:], SRTLATypeRegErr)
+	_, _ = srtlaSock.WriteToUDP(header[:], addr)
+}
 
-	if isSrtlaReg1(msg) {
-		registerGroup(rinfo, msg, ts)
-		return
-	}
-	if isSrtlaReg2(msg) {
-		connReg(rinfo, msg, ts)
-		return
-	}
-
-	addrKey := getAddrKey(rinfo)
-
-	globalMutex.RLock()
-	group, ok := groupsByAddr[addrKey]
-	globalMutex.RUnlock()
-
-	if !ok {
-		logDebug("Discarding packet from unknown source %s", addrKey)
+func registerGroup(addr *net.UDPAddr, pkt []byte) {
+	if len(groups) >= MaxGroups {
+		log.Printf("[%s] registration failed: max groups reached", addr)
+		sendRegErr(addr)
 		return
 	}
 
-	group.Lock() // Lock group for modification
-
-	conn, ok := group.connsByAddr[addrKey]
-	if !ok {
-		group.Unlock()
-		logDebug("Discarding packet from known group but unknown conn %s", addrKey)
+	// Prevent duplicate registration from same remote addr
+	if g, _ := findByAddr(addr); g != nil {
+		log.Printf("[%s] registration failed: addr already in group", addr)
+		sendRegErr(addr)
 		return
 	}
 
-	conn.lastRcvd = ts
-	group.lastAddr = rinfo
+	clientID := make([]byte, SRTLAIDLen/2)
+	copy(clientID, pkt[2:])
+	g := newGroup(clientID)
 
-	if isSrtlaKeepalive(msg) {
-		sendTo(rinfo, msg)
-		group.Unlock()
+	// store last addr so that no other group can register from it
+	g.lastAddr = addr
+
+	// build REG2
+	out := make([]byte, SRTLAReg2Len)
+	binary.BigEndian.PutUint16(out[:2], SRTLATypeReg2)
+	copy(out[2:], g.id[:])
+
+	if _, err := srtlaSock.WriteToUDP(out, addr); err != nil {
+		log.Printf("[%s] registration failed: %v", addr, err)
 		return
 	}
 
-	if len(msg) < SRT_MIN_LEN {
-		logDebug("[Group: %s] Discarding short packet (%d bytes)", group.getShortId(), len(msg))
-		group.Unlock()
+	groupsMu.Lock()
+	groups = append(groups, g)
+	groupsMu.Unlock()
+
+	log.Printf("[%s] [Group %p] registered", addr, g)
+}
+
+func registerConn(addr *net.UDPAddr, pkt []byte) {
+	id := pkt[2:]
+	g := findGroupByID(id)
+	if g == nil {
+		var hdr [2]byte
+		binary.BigEndian.PutUint16(hdr[:], SRTLATypeRegNGP)
+		srtlaSock.WriteToUDP(hdr[:], addr)
+		log.Printf("[%s] conn registration failed: no group", addr)
 		return
 	}
 
-	sn := getSrtSn(msg)
-	if sn >= 0 {
-		registerPacket(conn, sn)
+	// Reject if this addr is already tied to another group
+	if tmp, _ := findByAddr(addr); tmp != nil && tmp != g {
+		sendRegErr(addr)
+		log.Printf("[%s] [Group %p] conn reg failed: addr in other group", addr, g)
+		return
 	}
 
-	forwardPacket := func() bool {
-		if group.srtSocket == nil {
-			group.Unlock() // must unlock before removeGroup to avoid deadlock
-			globalMutex.Lock()
-			removeGroup(group)
-			globalMutex.Unlock()
-			return false // indicate that group was unlocked
+	var already bool
+
+	g.mu.Lock()
+	// Check for existing connection entry
+	for _, c := range g.conns {
+		if udpAddrEqual(c.addr, addr) {
+			already = true
+			break
 		}
-		_, err := group.srtSocket.Write(msg)
-		if err != nil {
-			logError("[Group: %s] Failed to forward packet: %v. Terminating group.", group.getShortId(), err)
-			group.Unlock() // must unlock before removeGroup to avoid deadlock
-			globalMutex.Lock()
-			removeGroup(group)
-			globalMutex.Unlock()
-			return false // indicate that group was unlocked
-		}
-		return true // indicate that group is still locked
 	}
 
-	if group.srtSocket == nil {
-		sock, err := net.DialUDP("udp", nil, srtAddress)
-		if err != nil {
-			logError("[Group: %s] Failed to create downstream SRT socket: %v", group.getShortId(), err)
-			group.Unlock()
+	// Add new connection if necessary
+	if !already {
+		if len(g.conns) >= MaxConnsPerGroup {
+			g.mu.Unlock()
+			sendRegErr(addr)
+			log.Printf("[%s] [Group %p] conn reg failed: too many conns", addr, g)
 			return
 		}
-
-		err = sock.SetReadBuffer(RECV_BUF_SIZE)
-		if err != nil {
-			logWarn("Could not set read buffer size on downstream socket: %v", err)
-		}
-		err = sock.SetWriteBuffer(SEND_BUF_SIZE)
-		if err != nil {
-			logWarn("Could not set write buffer size on downstream socket: %v", err)
-		}
-
-		group.srtSocket = sock
-		logInfo("[Group: %s] Created SRT socket connected to %s. Local Port: %s", group.getShortId(), srtAddress.String(), sock.LocalAddr().String())
-
-		// Start a goroutine to listen for messages from the downstream server
-		go func(g *SrtlaConnGroup) {
-			buf := make([]byte, MTU_SIZE)
-			for {
-				n, err := g.srtSocket.Read(buf)
-				if err != nil {
-					// Socket closed, goroutine can exit
-					g.RLock()
-					isSocketNil := g.srtSocket == nil
-					g.RUnlock()
-					if !isSocketNil {
-						logInfo("[Group: %s] Downstream socket read error, likely closed: %v", g.getShortId(), err)
-					}
-					return
-				}
-				handleSrtData(g, buf[:n])
-			}
-		}(group)
+		g.conns = append(g.conns, &Conn{addr: addr, lastRcvd: time.Now()})
 	}
 
-	if forwardPacket() {
-		group.Unlock() // Everything done, unlock group only if still locked
+	// Update most-recent peer
+	g.lastAddr = addr
+	g.mu.Unlock()
+
+	// Send REG3 response
+	var hdr [2]byte
+	binary.BigEndian.PutUint16(hdr[:], SRTLATypeReg3)
+	_, _ = srtlaSock.WriteToUDP(hdr[:], addr)
+
+	log.Printf("[%s] [Group %p] conn registered", addr, g)
+}
+
+func startSRTReader(g *Group) {
+	go func() {
+		buf := make([]byte, MTU)
+		for {
+			g.mu.Lock()
+			conn := g.srtSock
+			g.mu.Unlock()
+			if conn == nil {
+				return
+			}
+			n, err := conn.Read(buf)
+			if err != nil {
+				log.Printf("[Group %p] SRT socket read error: %v", g, err)
+				g.close()
+				removeGroup(g)
+				return
+			}
+			handleSRTData(g, buf[:n])
+		}
+	}()
+}
+
+func handleSRTData(g *Group, pkt []byte) {
+	if len(pkt) < 4 {
+		return
+	}
+	if isSRTAck(pkt) {
+		// broadcast ACK to all conns
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		for _, c := range g.conns {
+			if _, err := srtlaSock.WriteToUDP(pkt, c.addr); err != nil {
+				log.Printf("[%s] [Group %p] failed to fwd SRT ACK: %v", c.addr, g, err)
+			}
+		}
+	} else {
+		// send via last active conn
+		g.mu.Lock()
+		dst := g.lastAddr
+		g.mu.Unlock()
+		if dst != nil {
+			if _, err := srtlaSock.WriteToUDP(pkt, dst); err != nil {
+				log.Printf("[%s] [Group %p] failed to fwd SRT pkt: %v", dst, g, err)
+			}
+		}
 	}
 }
 
-func cleanupGroupsAndConnections() {
-	logDebug("Starting cleanup run...")
-	ts := time.Now()
-	groupTimeout := GROUP_TIMEOUT_S
-	connTimeout := CONN_TIMEOUT_S
+func handleSRTLAIncoming(pkt []byte, addr *net.UDPAddr) {
+	now := time.Now()
 
-	removedGroups := 0
-	removedConns := 0
-
-	globalMutex.Lock()
-	defer globalMutex.Unlock()
-
-	for _, group := range groupsById {
-		group.Lock()
-		initialConnCount := len(group.connsByAddr)
-
-		for key, conn := range group.connsByAddr {
-			if ts.Sub(conn.lastRcvd) > connTimeout {
-				logInfo("[%s] [Group: %s] Connection removed (timed out)", conn.addrKey, group.getShortId())
-				delete(group.connsByAddr, key)
-				delete(groupsByAddr, key)
-				removedConns++
-			}
-		}
-
-		if len(group.connsByAddr) == 0 && initialConnCount > 0 && ts.Sub(group.createdAt) > groupTimeout {
-			logInfo("[Group: %s] Group removed (no connections and timed out)", group.getShortId())
-			// removeGroup expects global lock to be held, which it is
-			// It also calls group.destroy, which takes a group lock, but we are holding it.
-			// To avoid deadlock, we must release the group lock before calling removeGroup.
-			// However, removeGroup also needs to modify groupsByAddr, which might be in use
-			// by the group. A copy is safer.
-			connsToRemove := make([]*SrtlaConn, 0, len(group.connsByAddr))
-			for _, c := range group.connsByAddr {
-				connsToRemove = append(connsToRemove, c)
-			}
-			lastAddrKey := ""
-			if group.lastAddr != nil {
-				lastAddrKey = getAddrKey(group.lastAddr)
-			}
-
-			group.Unlock() // Release group lock
-
-			delete(groupsById, group.idKey)
-			for _, conn := range connsToRemove {
-				delete(groupsByAddr, conn.addrKey)
-			}
-			if lastAddrKey != "" {
-				delete(groupsByAddr, lastAddrKey)
-			}
-			group.destroy()
-			removedGroups++
-			continue // skip to next group in outer loop
-		}
-		group.Unlock()
+	if isSRTLAReg1(pkt) {
+		registerGroup(addr, pkt)
+		return
 	}
-	logDebug("Cleanup run ended. Removed %d groups and %d connections.", removedGroups, removedConns)
+	if isSRTLAReg2(pkt) {
+		registerConn(addr, pkt)
+		return
+	}
+
+	g, c := findByAddr(addr)
+	if g == nil || c == nil {
+		return // not part of any group
+	}
+
+	c.lastRcvd = now
+	g.lastAddr = addr
+
+	if isSRTLAKeepalive(pkt) {
+		// echo back
+		srtlaSock.WriteToUDP(pkt, addr)
+		return
+	}
+
+	// Forward to SRT socket, creating it if needed
+	g.mu.Lock()
+	if g.srtSock == nil {
+		conn, err := net.DialUDP("udp", nil, srtAddr)
+		if err != nil {
+			g.mu.Unlock()
+			log.Printf("[Group %p] failed to dial SRT server: %v", g, err)
+			removeGroup(g)
+			return
+		}
+		// increase buffers
+		_ = conn.SetReadBuffer(RecvBufSize)
+		_ = conn.SetWriteBuffer(SendBufSize)
+		g.srtSock = conn
+		g.mu.Unlock()
+		startSRTReader(g)
+		log.Printf("[Group %p] created SRT socket (local %s)", g, conn.LocalAddr())
+	} else {
+		g.mu.Unlock()
+	}
+
+	g.mu.Lock()
+	srtConn := g.srtSock
+	g.mu.Unlock()
+	if srtConn == nil {
+		return
+	}
+
+	_, err := srtConn.Write(pkt)
+	if err != nil {
+		log.Printf("[Group %p] failed to fwd SRTLA pkt: %v", g, err)
+		g.close()
+		removeGroup(g)
+	}
 }
 
-//=============================================================================
-// MAIN EXECUTION
-//=============================================================================
+func cleanup() {
+	now := time.Now()
+
+	groupsMu.Lock()
+	defer groupsMu.Unlock()
+
+	var newGroups []*Group
+	for _, g := range groups {
+		g.mu.Lock()
+		// remove stale conns
+		var newConns []*Conn
+		for _, c := range g.conns {
+			if now.Sub(c.lastRcvd) < ConnTimeout {
+				newConns = append(newConns, c)
+			} else {
+				log.Printf("[%s] [Group %p] connection timed out", c.addr, g)
+			}
+		}
+		if len(newConns) != len(g.conns) {
+			g.conns = newConns
+		}
+
+		// decide if group should stay
+		keep := true
+		if len(g.conns) == 0 && now.Sub(g.createdAt) > GroupTimeout {
+			keep = false
+		}
+		g.mu.Unlock()
+
+		if keep {
+			newGroups = append(newGroups, g)
+		} else {
+			log.Printf("[Group %p] removed (no connections)", g)
+			g.close()
+		}
+	}
+	groups = newGroups
+}
+
+func resolveSRTAddr(host string, port uint16) (*net.UDPAddr, error) {
+	addrs, err := net.LookupIP(host)
+	if err != nil {
+		return nil, err
+	}
+
+	hsPkt := make([]byte, 48) // sizeof(srt_handshake_t) in original code
+	binary.BigEndian.PutUint16(hsPkt[0:], SRTTypeHandshake)
+	binary.BigEndian.PutUint32(hsPkt[4:], 4)  // version
+	binary.BigEndian.PutUint16(hsPkt[8:], 2)  // ext field
+	binary.BigEndian.PutUint32(hsPkt[12:], 1) // handshake type = induction
+
+	for _, ip := range addrs {
+		raddr := &net.UDPAddr{IP: ip, Port: int(port)}
+		conn, err := net.DialUDP("udp", nil, raddr)
+		if err != nil {
+			continue
+		}
+		conn.SetDeadline(time.Now().Add(2 * time.Second))
+		_, err = conn.Write(hsPkt)
+		if err == nil {
+			buf := make([]byte, MTU)
+			n, err := conn.Read(buf)
+			if err == nil && n == len(hsPkt) {
+				conn.Close()
+				return raddr, nil
+			}
+		}
+		conn.Close()
+	}
+	// Fallback to first IP even if handshake failed
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("no IPs for host %s", host)
+	}
+	return &net.UDPAddr{IP: addrs[0], Port: int(port)}, nil
+}
 
 func main() {
-	parseArgs()
+	var (
+		srtlaPort = flag.Uint("srtla_port", 5000, "UDP port to listen on for SRTLA")
+		srtHost   = flag.String("srt_hostname", "127.0.0.1", "Downstream SRT server host")
+		srtPort   = flag.Uint("srt_port", 5001, "Downstream SRT server port")
+		verbose   = flag.Bool("verbose", false, "Enable verbose logging")
+	)
+	flag.Parse()
 
-	logInfo("srtla_rec v%s starting...", VERSION)
-	logInfo("Config - SRTLA Port: %d, SRT Target: %s:%d, Verbose: %v",
-		args.SrtlaPort, args.SrtHostname, args.SrtPort, args.Verbose)
+	if *verbose {
+		log.SetFlags(log.LstdFlags | log.Lshortfile)
+	} else {
+		log.SetFlags(0)
+	}
 
-	// Resolve downstream SRT server address
 	var err error
-	srtAddress, err = net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", args.SrtHostname, args.SrtPort))
+	srtAddr, err = resolveSRTAddr(*srtHost, uint16(*srtPort))
 	if err != nil {
-		logCritical("Failed to resolve downstream SRT hostname '%s': %v", args.SrtHostname, err)
+		log.Fatalf("could not resolve SRT server: %v", err)
 	}
-	logInfo("Downstream SRT server target set to %s", srtAddress.String())
+	log.Printf("using SRT server %s", srtAddr)
 
-	// Create main listening socket
-	listenAddr := &net.UDPAddr{Port: args.SrtlaPort, IP: net.ParseIP("::")}
-	srtlaSocket, err = net.ListenUDP("udp", listenAddr)
+	// Listen UDP (dual-stack) for SRT-LA
+	laddr := &net.UDPAddr{IP: net.IPv6unspecified, Port: int(*srtlaPort)}
+	srtlaSock, err = net.ListenUDP("udp", laddr)
 	if err != nil {
-		logCritical("Failed to bind SRTLA listener on port %d: %v", args.SrtlaPort, err)
+		log.Fatalf("failed to listen on UDP port %d: %v", *srtlaPort, err)
 	}
-	defer srtlaSocket.Close()
+	_ = srtlaSock.SetReadBuffer(RecvBufSize)
+	_ = srtlaSock.SetWriteBuffer(SendBufSize)
 
-	err = srtlaSocket.SetReadBuffer(RECV_BUF_SIZE)
-	if err != nil {
-		logWarn("Could not set read buffer size on main socket: %v", err)
-	}
-	err = srtlaSocket.SetWriteBuffer(SEND_BUF_SIZE)
-	if err != nil {
-		logWarn("Could not set write buffer size on main socket: %v", err)
-	}
+	log.Printf("go-srtla running – listening on %s", srtlaSock.LocalAddr())
 
-	logInfo("srtla_rec is now running, listening on %s", srtlaSocket.LocalAddr().String())
-
-	// Set up context for graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Start periodic tasks
+	// Reader goroutine for SRT-LA socket
 	go func() {
-		ticker := time.NewTicker(CLEANUP_PERIOD_S)
-		defer ticker.Stop()
+		buf := make([]byte, MTU)
 		for {
-			select {
-			case <-ticker.C:
-				cleanupGroupsAndConnections()
-			case <-ctx.Done():
-				return
+			n, addr, err := srtlaSock.ReadFromUDP(buf)
+			if err != nil {
+				log.Printf("read error: %v", err)
+				continue
 			}
+			pkt := make([]byte, n)
+			copy(pkt, buf[:n])
+			handleSRTLAIncoming(pkt, addr)
 		}
 	}()
 
-	// Handle shutdown signals
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigChan
-		logInfo("Shutting down...")
+	// Periodic cleanup ticker
+	ticker := time.NewTicker(CleanupPeriod)
+	for range ticker.C {
+		cleanup()
+	}
+}
 
-		globalMutex.RLock()
-		for _, group := range groupsById {
-			group.destroy()
+// removeGroup deletes the group from global slice and frees its resources.
+func removeGroup(g *Group) {
+	groupsMu.Lock()
+	defer groupsMu.Unlock()
+	for i, gg := range groups {
+		if gg == g {
+			groups = append(groups[:i], groups[i+1:]...)
+			break
 		}
-		globalMutex.RUnlock()
+	}
+	g.close()
+}
 
-		cancel()
-		srtlaSocket.Close() // This will cause the ReadFromUDP loop to exit
-	}()
-
-	// Main listening loop
-	buffer := make([]byte, MTU_SIZE)
-	for {
-		n, rinfo, err := srtlaSocket.ReadFromUDP(buffer)
-		if err != nil {
-			select {
-			case <-ctx.Done(): // Expected error on shutdown
-				logInfo("Listener stopped.")
-				return
-			default: // Unexpected error
-				logError("SRTLA socket read error: %v", err)
-			}
-			return
-		}
-
-		// Make a copy of the slice to handle it concurrently
-		msg := make([]byte, n)
-		copy(msg, buffer[:n])
-
-		// Handle packet in a new goroutine to avoid blocking the listener
-		go handleSrtlaData(msg, rinfo)
+func (g *Group) close() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.srtSock != nil {
+		g.srtSock.Close()
+		g.srtSock = nil
 	}
 }

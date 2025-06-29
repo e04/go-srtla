@@ -27,7 +27,7 @@ After building, run the binary:
 For example:
 
 ```bash
-./go-srtla -srtla_port 5000 -srt_hostname 127.0.0.1 -srt_por 5001
+./go-srtla -srtla_port 5000 -srt_hostname 127.0.0.1 -srt_port 5001
 ```
 
 ### Receiving in OBS
@@ -44,7 +44,6 @@ To receive the aggregated SRT stream in OBS:
 - `-srt_hostname <hostname>`: Hostname of the downstream SRT server (default: 127.0.0.1)
 - `-srt_port <port>`: Port of the downstream SRT server (default: 5001)
 - `-verbose`: Enable verbose logging
-- `-version`: Show version number
 - `-help`: Show help
 
 ## License
