@@ -46,20 +46,11 @@ To receive the aggregated SRT stream in OBS:
 - `-verbose`: Enable verbose logging
 - `-help`: Show help
 
-## Related Tools
+## The `go-irl` Stack
 
-You can build a more advanced and resilient streaming workflow by combining `go-srtla` with these related tools:
+`go-srtla` is a core component of **[go-irl](https://github.com/e04/go-irl)**, a complete, modern streaming stack designed for robust IRL broadcasting.
 
-- **[srt-live-reporter](https://github.com/e04/srt-live-reporter)**  
-  A proxy that can be placed downstream from `go-srtla` to provide statistics (latency, packet loss, etc.) for the aggregated SRT stream via WebSocket. This is useful for real-time monitoring of your stream's health.
-
-- **[obs-srt-bridge](https://github.com/e04/obs-srt-bridge)**  
-  Works in conjunction with `srt-live-reporter` to automatically switch OBS scenes based on SRT statistics. For example, you can configure it to automatically switch to a "Technical Difficulties" scene if network quality degrades, creating a more professional and automated broadcast.
-
-## Usage Example
-
-- **[Building a IRL Streaming Setup with go-srtla, srt-live-reporter and obs-srt-bridge](https://gist.github.com/e04/3914d98d6d0a55c689ab724ac6896081)**  
-  This Gist provides a detailed, step-by-step guide on how to set up a full bonding workflow: streaming from a smartphone app over multiple connections (e.g., Cellular and Wi-Fi), receiving it with `go-srtla`, and finally pulling it into OBS.
+If you are looking for an easier setup with more advanced features, consider using `go-irl`. It bundles `go-srtla` with other essential tools (`srt-live-reporter`, `obs-srt-bridge`) and provides a simple, one-command launcher.
 
 ## License
 
