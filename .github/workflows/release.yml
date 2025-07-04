@@ -59,9 +59,9 @@ jobs:
       - name: Create ZIP archives
         run: |
           cd dist
-          zip -j go-srtla-macos-arm64.zip macos-arm64/go-srtla
-          zip -j go-srtla-linux-x64.zip linux-x64/go-srtla
-          zip -j go-srtla-linux-arm64.zip linux-arm64/go-srtla
+          zip -j go-srtla-macos-arm64.zip macos-arm64/go-srtla ../README.md
+          zip -j go-srtla-linux-x64.zip linux-x64/go-srtla ../README.md
+          zip -j go-srtla-linux-arm64.zip linux-arm64/go-srtla ../README.md
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -92,6 +92,7 @@ jobs:
         run: |
           mkdir dist\windows-x64
           go build -o dist\windows-x64\go-srtla.exe
+          Copy-Item -Path README.md -Destination dist\windows-x64\
           Compress-Archive -Path dist\windows-x64\* -DestinationPath dist\go-srtla-windows-x64.zip
 
       - name: Upload artifacts
